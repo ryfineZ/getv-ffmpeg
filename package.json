@@ -1,0 +1,19 @@
+{
+  "name": "getv-ffmpeg",
+  "version": "1.0.0",
+  "description": "FFmpeg API service for GetV video processing",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "fluent-ffmpeg": "^2.1.2",
+    "cors": "^2.8.5",
+    "uuid": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
