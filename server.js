@@ -724,19 +724,20 @@ app.post('/download', async (req, res) => {
         // 构建格式参数
         let formatArg;
         if (formatId) {
-          // 指定格式 ID
-          // 对于只有视频或只有音频的格式，需要合并
-          if (formatId.startsWith('137') || formatId.startsWith('22') || formatId.startsWith('18')) {
-            // 这些格式通常有视频+音频，直接下载
+          // 已知的有音频格式（直接下载）
+          const hasAudioFormats = ['18', '22', '36', '17', '5', '6']; // 360p, 720p等有音频格式
+          if (hasAudioFormats.includes(formatId)) {
             formatArg = formatId;
           } else {
-            // 尝试下载指定格式 + 最佳音频
+            // 无音频格式，需要合并最佳音频
             formatArg = `${formatId}+bestaudio/best`;
           }
         } else {
           // 默认下载最佳质量
           formatArg = 'bestvideo+bestaudio/best';
         }
+
+        console.log(`[Download] 格式参数: ${formatArg}`);
 
         await new Promise((resolve, reject) => {
           const ytdlp = spawn('yt-dlp', [
@@ -773,23 +774,6 @@ app.post('/download', async (req, res) => {
             }
           });
         });
-
-        // 检查文件是否存在
-        if (!fs.existsSync(outputFile)) {
-          // 可能没有合并成功，尝试直接下载
-          console.log(`[Download] 直接下载格式: ${formatId || 'best'}`);
-          await new Promise((resolve, reject) => {
-            const ytdlp2 = spawn('yt-dlp', [
-              '-f', formatId || 'best',
-              '--no-warnings',
-              '--no-playlist',
-              '-o', outputFile,
-              videoUrl
-            ]);
-            ytdlp2.on('close', (code) => code === 0 ? resolve() : reject(new Error('下载失败')));
-            ytdlp2.on('error', reject);
-          });
-        }
 
         res.download(outputFile, 'video.mp4', (err) => {
           cleanupFiles(outputFile);
