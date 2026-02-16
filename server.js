@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
+const { spawn } = require('child_process');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -30,24 +31,94 @@ app.use((req, res, next) => {
 });
 
 /**
+ * 检测是否需要使用 yt-dlp 下载
+ */
+function needsYtdlp(url) {
+  return url.includes('youtube.com') ||
+         url.includes('youtu.be') ||
+         url.includes('googlevideo.com') ||
+         url.includes('.m3u8');
+}
+
+/**
+ * 使用 yt-dlp 下载文件
+ */
+async function downloadWithYtdlp(url, outputPath) {
+  return new Promise((resolve, reject) => {
+    console.log(`[ytdlp] 下载: ${url.substring(0, 100)}...`);
+
+    const ytdlp = spawn('yt-dlp', [
+      '-f', 'best',
+      '--no-warnings',
+      '--no-playlist',
+      '-o', outputPath,
+      url
+    ]);
+
+    let stderr = '';
+
+    ytdlp.stdout.on('data', (data) => {
+      const msg = data.toString();
+      if (msg.includes('[download]')) {
+        console.log(`[ytdlp] ${msg.trim()}`);
+      }
+    });
+
+    ytdlp.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    ytdlp.on('error', (err) => {
+      console.error('[ytdlp] 错误:', err.message);
+      reject(new Error(`yt-dlp 启动失败: ${err.message}`));
+    });
+
+    ytdlp.on('close', (code) => {
+      if (code === 0) {
+        console.log(`[ytdlp] 下载完成: ${outputPath}`);
+        resolve(outputPath);
+      } else {
+        reject(new Error(`yt-dlp 失败 (code ${code}): ${stderr}`));
+      }
+    });
+  });
+}
+
+/**
  * 下载文件到临时目录
+ * 自动检测 URL 类型，YouTube URL 使用 yt-dlp 下载
  */
 async function downloadFile(url, filename) {
   const filePath = path.join(TEMP_DIR, filename);
+
+  // 检测是否需要使用 yt-dlp
+  if (needsYtdlp(url)) {
+    return downloadWithYtdlp(url, filePath);
+  }
+
+  // 普通 URL 使用 http/https 下载
   const protocol = url.startsWith('https') ? https : http;
 
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(filePath);
     let downloaded = 0;
 
-    protocol.get(url, (response) => {
+    const request = protocol.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    }, (response) => {
       // 处理重定向
       if (response.statusCode === 301 || response.statusCode === 302) {
+        file.close();
+        fs.unlinkSync(filePath);
         downloadFile(response.headers.location, filename).then(resolve).catch(reject);
         return;
       }
 
       if (response.statusCode !== 200) {
+        file.close();
+        fs.unlinkSync(filePath);
         reject(new Error(`HTTP ${response.statusCode}`));
         return;
       }
@@ -67,9 +138,18 @@ async function downloadFile(url, filename) {
         file.close();
         resolve(filePath);
       });
-    }).on('error', (err) => {
-      fs.unlinkSync(filePath);
+    });
+
+    request.on('error', (err) => {
+      file.close();
+      try { fs.unlinkSync(filePath); } catch {}
       reject(err);
+    });
+
+    // 设置超时
+    request.setTimeout(30000, () => {
+      request.destroy();
+      reject(new Error('下载超时'));
     });
   });
 }

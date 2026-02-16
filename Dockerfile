@@ -1,9 +1,20 @@
 FROM node:20-slim
 
-# 安装 FFmpeg
+# 安装 FFmpeg, Python 和 yt-dlp
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    python3 \
+    python3-pip \
+    python3-venv \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# 安装 yt-dlp（使用 pip）
+RUN pip3 install --break-system-packages yt-dlp
+
+# 验证安装
+RUN ffmpeg -version && yt-dlp --version
 
 # 创建应用目录
 WORKDIR /app
