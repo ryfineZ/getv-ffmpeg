@@ -700,11 +700,11 @@ app.post('/probe', async (req, res) => {
 /**
  * 下载视频
  * POST /download
- * Body: { videoUrl, audioUrl, action, trim, audioFormat, audioBitrate }
+ * Body: { videoUrl, formatId, audioUrl, action, trim, audioFormat, audioBitrate }
  * action: download | merge | trim | extract-audio
  */
 app.post('/download', async (req, res) => {
-  const { videoUrl, audioUrl, action = 'download', trim, audioFormat = 'mp3', audioBitrate = 320 } = req.body;
+  const { videoUrl, formatId, audioUrl, action = 'download', trim, audioFormat = 'mp3', audioBitrate = 320 } = req.body;
 
   if (!videoUrl) {
     return res.status(400).json({ error: '缺少 videoUrl' });
@@ -717,13 +717,30 @@ app.post('/download', async (req, res) => {
     if (action === 'download') {
       // 检测是否需要 yt-dlp
       if (needsYtdlp(videoUrl)) {
-        console.log(`[Download] 使用 yt-dlp 下载 YouTube 视频, taskId: ${taskId}`);
+        console.log(`[Download] 使用 yt-dlp 下载, taskId: ${taskId}, formatId: ${formatId || 'best'}`);
 
         const outputFile = path.join(TEMP_DIR, `${taskId}_output.mp4`);
 
+        // 构建格式参数
+        let formatArg;
+        if (formatId) {
+          // 指定格式 ID
+          // 对于只有视频或只有音频的格式，需要合并
+          if (formatId.startsWith('137') || formatId.startsWith('22') || formatId.startsWith('18')) {
+            // 这些格式通常有视频+音频，直接下载
+            formatArg = formatId;
+          } else {
+            // 尝试下载指定格式 + 最佳音频
+            formatArg = `${formatId}+bestaudio/best`;
+          }
+        } else {
+          // 默认下载最佳质量
+          formatArg = 'bestvideo+bestaudio/best';
+        }
+
         await new Promise((resolve, reject) => {
           const ytdlp = spawn('yt-dlp', [
-            '-f', 'bestvideo+bestaudio/best',
+            '-f', formatArg,
             '--no-warnings',
             '--no-playlist',
             '--merge-output-format', 'mp4',
@@ -756,6 +773,23 @@ app.post('/download', async (req, res) => {
             }
           });
         });
+
+        // 检查文件是否存在
+        if (!fs.existsSync(outputFile)) {
+          // 可能没有合并成功，尝试直接下载
+          console.log(`[Download] 直接下载格式: ${formatId || 'best'}`);
+          await new Promise((resolve, reject) => {
+            const ytdlp2 = spawn('yt-dlp', [
+              '-f', formatId || 'best',
+              '--no-warnings',
+              '--no-playlist',
+              '-o', outputFile,
+              videoUrl
+            ]);
+            ytdlp2.on('close', (code) => code === 0 ? resolve() : reject(new Error('下载失败')));
+            ytdlp2.on('error', reject);
+          });
+        }
 
         res.download(outputFile, 'video.mp4', (err) => {
           cleanupFiles(outputFile);
