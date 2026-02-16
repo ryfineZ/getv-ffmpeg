@@ -178,9 +178,193 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     ffmpeg: true,
+    ytdlp: true,
     timestamp: new Date().toISOString()
   });
 });
+
+/**
+ * 解析视频信息
+ * POST /parse
+ * Body: { url }
+ * 使用 yt-dlp ��取视频元数据和下载链接
+ */
+app.post('/parse', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ success: false, error: '缺少 url' });
+  }
+
+  console.log(`[Parse] 解析: ${url.substring(0, 100)}...`);
+
+  try {
+    // 使用 yt-dlp 获取视频信息（JSON 格式）
+    const info = await new Promise((resolve, reject) => {
+      const ytdlp = spawn('yt-dlp', [
+        '--no-warnings',
+        '--no-playlist',
+        '--dump-json',
+        '-f', 'bestvideo+bestaudio/best',
+        url
+      ]);
+
+      let stdout = '';
+      let stderr = '';
+
+      ytdlp.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      ytdlp.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      ytdlp.on('error', (err) => {
+        reject(new Error(`yt-dlp 启动失败: ${err.message}`));
+      });
+
+      ytdlp.on('close', (code) => {
+        if (code === 0) {
+          try {
+            resolve(JSON.parse(stdout));
+          } catch (e) {
+            reject(new Error('解析 JSON 失败'));
+          }
+        } else {
+          reject(new Error(`yt-dlp 失败: ${stderr}`));
+        }
+      });
+    });
+
+    // 构建格式列表
+    const formats = [];
+
+    // 添加渐进式格式（视频+音频）
+    if (info.formats) {
+      // 合并格式（有视频有音频）
+      const mergedFormats = info.formats.filter(f =>
+        f.vcodec !== 'none' && f.acodec !== 'none' && f.url
+      );
+
+      // 仅视频格式
+      const videoOnlyFormats = info.formats.filter(f =>
+        f.vcodec !== 'none' && (f.acodec === 'none' || !f.acodec) && f.url
+      );
+
+      // 仅音频格式
+      const audioOnlyFormats = info.formats.filter(f =>
+        (f.vcodec === 'none' || !f.vcodec) && f.acodec !== 'none' && f.url
+      );
+
+      // 处理合并格式
+      for (const f of mergedFormats) {
+        const quality = f.format_note || f.height ? `${f.height}p` : 'default';
+        formats.push({
+          id: f.format_id || `merged-${f.height}`,
+          quality,
+          format: f.ext || 'mp4',
+          size: f.filesize || f.filesize_approx,
+          sizeText: f.filesize ? formatBytes(f.filesize) : (f.filesize_approx ? formatBytes(f.filesize_approx) : undefined),
+          url: f.url,
+          hasVideo: true,
+          hasAudio: true,
+          bitrate: f.tbr,
+        });
+      }
+
+      // 处理仅视频格式
+      for (const f of videoOnlyFormats) {
+        const quality = f.format_note || f.height ? `${f.height}p` : 'default';
+        formats.push({
+          id: f.format_id || `video-${f.height}`,
+          quality,
+          format: f.ext || 'mp4',
+          size: f.filesize || f.filesize_approx,
+          sizeText: f.filesize ? formatBytes(f.filesize) : (f.filesize_approx ? formatBytes(f.filesize_approx) : undefined),
+          url: f.url,
+          hasVideo: true,
+          hasAudio: false,
+          bitrate: f.tbr,
+          codec: f.vcodec,
+          fps: f.fps,
+        });
+      }
+
+      // 处理仅音频格式（取最高音质）
+      const bestAudio = audioOnlyFormats.sort((a, b) => (b.tbr || 0) - (a.tbr || 0))[0];
+      if (bestAudio) {
+        formats.push({
+          id: bestAudio.format_id || 'audio-best',
+          quality: `音频 (${Math.round((bestAudio.tbr || 0) / 1000)}kbps)`,
+          format: bestAudio.ext || 'm4a',
+          size: bestAudio.filesize || bestAudio.filesize_approx,
+          sizeText: bestAudio.filesize ? formatBytes(bestAudio.filesize) : undefined,
+          url: bestAudio.url,
+          hasVideo: false,
+          hasAudio: true,
+          bitrate: bestAudio.tbr,
+        });
+      }
+    }
+
+    // 按画质排序
+    formats.sort((a, b) => {
+      const qualityOrder = ['2160p', '1440p', '1080p', '720p', '480p', '360p', '240p', '144p'];
+      const aIndex = qualityOrder.indexOf(a.quality);
+      const bIndex = qualityOrder.indexOf(b.quality);
+      return aIndex - bIndex;
+    });
+
+    console.log(`[Parse] 成功, 标题: ${info.title}, 格式数: ${formats.length}`);
+
+    res.json({
+      success: true,
+      data: {
+        id: info.id,
+        platform: 'youtube',
+        title: info.title || '未知标题',
+        description: info.description,
+        thumbnail: info.thumbnail,
+        duration: info.duration,
+        durationText: formatDuration(info.duration),
+        author: info.uploader || info.channel,
+        formats,
+        originalUrl: url,
+        parsedAt: Date.now(),
+      }
+    });
+
+  } catch (error) {
+    console.error('[Parse] 错误:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * 格式化字节
+ */
+function formatBytes(bytes) {
+  if (!bytes) return undefined;
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+/**
+ * 格式化时长
+ */
+function formatDuration(seconds) {
+  if (!seconds) return '0:00';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  }
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 /**
  * 获取 FFmpeg 版本信息
