@@ -697,6 +697,188 @@ app.post('/probe', async (req, res) => {
   }
 });
 
+/**
+ * 下载视频
+ * POST /download
+ * Body: { videoUrl, audioUrl, action, trim, audioFormat, audioBitrate }
+ * action: download | merge | trim | extract-audio
+ */
+app.post('/download', async (req, res) => {
+  const { videoUrl, audioUrl, action = 'download', trim, audioFormat = 'mp3', audioBitrate = 320 } = req.body;
+
+  if (!videoUrl) {
+    return res.status(400).json({ error: '缺少 videoUrl' });
+  }
+
+  const taskId = uuidv4();
+
+  try {
+    // 下载操作
+    if (action === 'download') {
+      // 检测是否需要 yt-dlp
+      if (needsYtdlp(videoUrl)) {
+        console.log(`[Download] 使用 yt-dlp 下载 YouTube 视频, taskId: ${taskId}`);
+
+        const outputFile = path.join(TEMP_DIR, `${taskId}_output.mp4`);
+
+        await new Promise((resolve, reject) => {
+          const ytdlp = spawn('yt-dlp', [
+            '-f', 'bestvideo+bestaudio/best',
+            '--no-warnings',
+            '--no-playlist',
+            '--merge-output-format', 'mp4',
+            '-o', outputFile,
+            videoUrl
+          ]);
+
+          let stderr = '';
+
+          ytdlp.stdout.on('data', (data) => {
+            const msg = data.toString();
+            if (msg.includes('[download]')) {
+              console.log(`[Download] ${msg.trim()}`);
+            }
+          });
+
+          ytdlp.stderr.on('data', (data) => {
+            stderr += data.toString();
+          });
+
+          ytdlp.on('error', (err) => {
+            reject(new Error(`yt-dlp 启动失败: ${err.message}`));
+          });
+
+          ytdlp.on('close', (code) => {
+            if (code === 0) {
+              resolve();
+            } else {
+              reject(new Error(`yt-dlp 失败 (code ${code}): ${stderr}`));
+            }
+          });
+        });
+
+        res.download(outputFile, 'video.mp4', (err) => {
+          cleanupFiles(outputFile);
+          if (err) console.error('发送文件失败:', err);
+        });
+        return;
+      }
+
+      // 普通 URL 直接代理下载
+      console.log(`[Download] 代理下载普通 URL, taskId: ${taskId}`);
+      const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
+      await downloadFile(videoUrl, `${taskId}_input`);
+
+      res.download(inputFile, 'video.mp4', (err) => {
+        cleanupFiles(inputFile);
+        if (err) console.error('发送文件失败:', err);
+      });
+      return;
+    }
+
+    // 合并操作
+    if (action === 'merge' && audioUrl) {
+      const videoFile = path.join(TEMP_DIR, `${taskId}_video`);
+      const audioFile = path.join(TEMP_DIR, `${taskId}_audio`);
+      const outputFile = path.join(TEMP_DIR, `${taskId}_output.mp4`);
+
+      await Promise.all([
+        downloadFile(videoUrl, `${taskId}_video`),
+        downloadFile(audioUrl, `${taskId}_audio`)
+      ]);
+
+      await new Promise((resolve, reject) => {
+        ffmpeg(videoFile)
+          .input(audioFile)
+          .outputOptions([
+            '-c:v copy',
+            '-c:a aac',
+            '-map 0:v:0',
+            '-map 1:a:0',
+            '-shortest'
+          ])
+          .output(outputFile)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+
+      res.download(outputFile, 'video.mp4', (err) => {
+        cleanupFiles(videoFile, audioFile, outputFile);
+        if (err) console.error('发送文件失败:', err);
+      });
+      return;
+    }
+
+    // 剪辑操作
+    if (action === 'trim' && trim) {
+      const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
+      const outputFile = path.join(TEMP_DIR, `${taskId}_output.mp4`);
+
+      await downloadFile(videoUrl, `${taskId}_input`);
+
+      await new Promise((resolve, reject) => {
+        ffmpeg(inputFile)
+          .setStartTime(trim.start)
+          .setDuration(trim.end - trim.start)
+          .outputOptions(['-c copy', '-avoid_negative_ts make_zero'])
+          .output(outputFile)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+
+      res.download(outputFile, 'video.mp4', (err) => {
+        cleanupFiles(inputFile, outputFile);
+        if (err) console.error('发送文件失败:', err);
+      });
+      return;
+    }
+
+    // 提取音频
+    if (action === 'extract-audio') {
+      const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
+      const outputFile = path.join(TEMP_DIR, `${taskId}_output.${audioFormat}`);
+
+      await downloadFile(videoUrl, `${taskId}_input`);
+
+      let command = ffmpeg(inputFile).noVideo();
+
+      if (audioFormat === 'mp3') {
+        command = command.outputOptions([
+          '-c:a libmp3lame',
+          `-b:a ${audioBitrate}k`
+        ]);
+      } else if (audioFormat === 'm4a' || audioFormat === 'aac') {
+        command = command.outputOptions([
+          '-c:a aac',
+          `-b:a ${audioBitrate}k`
+        ]);
+      }
+
+      await new Promise((resolve, reject) => {
+        command
+          .output(outputFile)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+
+      res.download(outputFile, `audio.${audioFormat}`, (err) => {
+        cleanupFiles(inputFile, outputFile);
+        if (err) console.error('发送文件失败:', err);
+      });
+      return;
+    }
+
+    return res.status(400).json({ error: '不支持的操作' });
+
+  } catch (error) {
+    console.error('[Download] 错误:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 定时清理过期临时文件（每小时）
 setInterval(() => {
   const files = fs.readdirSync(TEMP_DIR);
