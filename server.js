@@ -35,9 +35,9 @@ app.use((req, res, next) => {
  */
 function needsYtdlp(url) {
   return url.includes('youtube.com') ||
-         url.includes('youtu.be') ||
-         url.includes('googlevideo.com') ||
-         url.includes('.m3u8');
+    url.includes('youtu.be') ||
+    url.includes('googlevideo.com') ||
+    url.includes('.m3u8');
 }
 
 /**
@@ -88,7 +88,7 @@ async function downloadWithYtdlp(url, outputPath) {
  * 下载文件到临时目录
  * 自动检测 URL 类型，YouTube URL 使用 yt-dlp 下载
  */
-async function downloadFile(url, filename) {
+async function downloadFile(url, filename, headers = {}) {
   const filePath = path.join(TEMP_DIR, filename);
 
   // 检测是否需要使用 yt-dlp
@@ -105,14 +105,15 @@ async function downloadFile(url, filename) {
 
     const request = protocol.get(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        ...headers,
       }
     }, (response) => {
       // 处理重定向
       if (response.statusCode === 301 || response.statusCode === 302) {
         file.close();
         fs.unlinkSync(filePath);
-        downloadFile(response.headers.location, filename).then(resolve).catch(reject);
+        downloadFile(response.headers.location, filename, headers).then(resolve).catch(reject);
         return;
       }
 
@@ -142,7 +143,7 @@ async function downloadFile(url, filename) {
 
     request.on('error', (err) => {
       file.close();
-      try { fs.unlinkSync(filePath); } catch {}
+      try { fs.unlinkSync(filePath); } catch { }
       reject(err);
     });
 
@@ -704,7 +705,10 @@ app.post('/probe', async (req, res) => {
  * action: download | merge | trim | extract-audio
  */
 app.post('/download', async (req, res) => {
-  const { videoUrl, formatId, audioUrl, action = 'download', trim, audioFormat = 'mp3', audioBitrate = 320 } = req.body;
+  const { videoUrl, formatId, audioUrl, action = 'download', trim, audioFormat = 'mp3', audioBitrate = 320, referer } = req.body;
+
+  // 构建下载请求头（传递 Referer 给 CDN）
+  const dlHeaders = referer ? { 'Referer': referer } : {};
 
   if (!videoUrl) {
     return res.status(400).json({ error: '缺少 videoUrl' });
@@ -785,7 +789,7 @@ app.post('/download', async (req, res) => {
       // 普通 URL 直接代理下载
       console.log(`[Download] 代理下载普通 URL, taskId: ${taskId}`);
       const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
-      await downloadFile(videoUrl, `${taskId}_input`);
+      await downloadFile(videoUrl, `${taskId}_input`, dlHeaders);
 
       res.download(inputFile, 'video.mp4', (err) => {
         cleanupFiles(inputFile);
@@ -801,8 +805,8 @@ app.post('/download', async (req, res) => {
       const outputFile = path.join(TEMP_DIR, `${taskId}_output.mp4`);
 
       await Promise.all([
-        downloadFile(videoUrl, `${taskId}_video`),
-        downloadFile(audioUrl, `${taskId}_audio`)
+        downloadFile(videoUrl, `${taskId}_video`, dlHeaders),
+        downloadFile(audioUrl, `${taskId}_audio`, dlHeaders)
       ]);
 
       await new Promise((resolve, reject) => {
@@ -833,7 +837,7 @@ app.post('/download', async (req, res) => {
       const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
       const outputFile = path.join(TEMP_DIR, `${taskId}_output.mp4`);
 
-      await downloadFile(videoUrl, `${taskId}_input`);
+      await downloadFile(videoUrl, `${taskId}_input`, dlHeaders);
 
       await new Promise((resolve, reject) => {
         ffmpeg(inputFile)
@@ -858,7 +862,7 @@ app.post('/download', async (req, res) => {
       const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
       const outputFile = path.join(TEMP_DIR, `${taskId}_output.${audioFormat}`);
 
-      await downloadFile(videoUrl, `${taskId}_input`);
+      await downloadFile(videoUrl, `${taskId}_input`, dlHeaders);
 
       let command = ffmpeg(inputFile).noVideo();
 
