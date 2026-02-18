@@ -90,8 +90,6 @@ async function downloadWithYtdlp(url, outputPath) {
  */
 async function downloadFile(url, filename, headers = {}) {
   const filePath = path.join(TEMP_DIR, filename);
-  console.log(`[downloadFile] URL: ${url.substring(0, 80)}...`);
-  console.log(`[downloadFile] Custom headers:`, JSON.stringify(headers));
 
   // 检测是否需要使用 yt-dlp
   if (needsYtdlp(url)) {
@@ -711,8 +709,6 @@ app.post('/download', async (req, res) => {
 
   // 构建下载请求头（传递 Referer 给 CDN）
   const dlHeaders = referer ? { 'Referer': referer } : {};
-  console.log(`[Download] referer from body: ${referer}`);
-  console.log(`[Download] dlHeaders:`, JSON.stringify(dlHeaders));
 
   if (!videoUrl) {
     return res.status(400).json({ error: '缺少 videoUrl' });
@@ -923,10 +919,10 @@ setInterval(() => {
 
 // 启动服务器
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 FFmpeg API 服务已启动`);
-  console.log(`   端口: ${PORT}`);
-  console.log(`   临时目录: ${TEMP_DIR}`);
-  console.log(`   最大文件: ${MAX_FILE_SIZE / 1024 / 1024}MB`);
+  console.log(`FFmpeg API v1.1.0 started`);
+  console.log(`   Port: ${PORT}`);
+  console.log(`   Temp: ${TEMP_DIR}`);
+  console.log(`   Max file: ${MAX_FILE_SIZE / 1024 / 1024}MB`);
 });
 
 module.exports = app;
