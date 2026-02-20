@@ -698,50 +698,39 @@ app.post('/probe', async (req, res) => {
   }
 });
 
-/**
- * 下载视频
- * POST /download
- * Body: { videoUrl, formatId, audioUrl, action, trim, audioFormat, audioBitrate }
- * action: download | merge | trim | extract-audio
- */
-app.post('/download', async (req, res) => {
-  const { videoUrl, formatId, audioUrl, action = 'download', trim, audioFormat = 'mp3', audioBitrate = 320, referer } = req.body;
+// ==================== 异步任务管理 ====================
 
-  // 构建下载请求头（传递 Referer 给 CDN）
+/**
+ * 任务状态存储（内存，重启后清空）
+ * { taskId: { status: 'pending'|'processing'|'done'|'error', outputFile, filename, error, createdAt } }
+ */
+const tasks = new Map();
+
+/**
+ * 后台执行下载任务
+ */
+async function runDownloadTask(taskId, { videoUrl, formatId, audioUrl, action, trim, audioFormat, audioBitrate, referer }) {
+  const task = tasks.get(taskId);
+  if (!task) return;
+
+  task.status = 'processing';
   const dlHeaders = referer ? { 'Referer': referer } : {};
 
-  if (!videoUrl) {
-    return res.status(400).json({ error: '缺少 videoUrl' });
-  }
-
-  const taskId = uuidv4();
-
   try {
-    // 下载操作
+    // ---- action: download ----
     if (action === 'download') {
-      // 检测是否需要 yt-dlp
       if (needsYtdlp(videoUrl)) {
-        console.log(`[Download] 使用 yt-dlp 下载, taskId: ${taskId}, formatId: ${formatId || 'best'}`);
-
         const outputFile = path.join(TEMP_DIR, `${taskId}_output.mp4`);
 
-        // 构建格式参数
         let formatArg;
         if (formatId) {
-          // 已知的有音频格式（直接下载）
-          const hasAudioFormats = ['18', '22', '36', '17', '5', '6']; // 360p, 720p等有音频格式
-          if (hasAudioFormats.includes(formatId)) {
-            formatArg = formatId;
-          } else {
-            // 无音频格式，需要合并最佳音频
-            formatArg = `${formatId}+bestaudio/best`;
-          }
+          const hasAudioFormats = ['18', '22', '36', '17', '5', '6'];
+          formatArg = hasAudioFormats.includes(formatId) ? formatId : `${formatId}+bestaudio/best`;
         } else {
-          // 默认下载最佳质量
           formatArg = 'bestvideo+bestaudio/best';
         }
 
-        console.log(`[Download] 格式参数: ${formatArg}`);
+        console.log(`[Task:${taskId}] yt-dlp format: ${formatArg}`);
 
         await new Promise((resolve, reject) => {
           const ytdlp = spawn('yt-dlp', [
@@ -752,54 +741,25 @@ app.post('/download', async (req, res) => {
             '-o', outputFile,
             videoUrl
           ]);
-
           let stderr = '';
-
-          ytdlp.stdout.on('data', (data) => {
-            const msg = data.toString();
-            if (msg.includes('[download]')) {
-              console.log(`[Download] ${msg.trim()}`);
-            }
-          });
-
-          ytdlp.stderr.on('data', (data) => {
-            stderr += data.toString();
-          });
-
-          ytdlp.on('error', (err) => {
-            reject(new Error(`yt-dlp 启动失败: ${err.message}`));
-          });
-
-          ytdlp.on('close', (code) => {
-            if (code === 0) {
-              resolve();
-            } else {
-              reject(new Error(`yt-dlp 失败 (code ${code}): ${stderr}`));
-            }
-          });
+          ytdlp.stdout.on('data', d => { if (d.toString().includes('[download]')) console.log(`[Task:${taskId}] ${d.toString().trim()}`); });
+          ytdlp.stderr.on('data', d => { stderr += d.toString(); });
+          ytdlp.on('error', err => reject(new Error(`yt-dlp 启动失败: ${err.message}`)));
+          ytdlp.on('close', code => code === 0 ? resolve() : reject(new Error(`yt-dlp 失败 (code ${code}): ${stderr}`)));
         });
 
-        res.download(outputFile, 'video.mp4', (err) => {
-          cleanupFiles(outputFile);
-          if (err) console.error('发送文件失败:', err);
-        });
-        return;
+        task.outputFile = outputFile;
+        task.filename = 'video.mp4';
+      } else {
+        const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
+        await downloadFile(videoUrl, `${taskId}_input`, dlHeaders);
+        task.outputFile = inputFile;
+        task.filename = 'video.mp4';
       }
-
-      // 普通 URL 直接代理下载
-      console.log(`[Download] 代理下载普通 URL, taskId: ${taskId}`);
-      const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
-      await downloadFile(videoUrl, `${taskId}_input`, dlHeaders);
-
-      res.download(inputFile, 'video.mp4', (err) => {
-        cleanupFiles(inputFile);
-        if (err) console.error('发送文件失败:', err);
-      });
-      return;
     }
 
-    // 合并操作
-    if (action === 'merge' && audioUrl) {
+    // ---- action: merge ----
+    else if (action === 'merge' && audioUrl) {
       const videoFile = path.join(TEMP_DIR, `${taskId}_video`);
       const audioFile = path.join(TEMP_DIR, `${taskId}_audio`);
       const outputFile = path.join(TEMP_DIR, `${taskId}_output.mp4`);
@@ -812,28 +772,21 @@ app.post('/download', async (req, res) => {
       await new Promise((resolve, reject) => {
         ffmpeg(videoFile)
           .input(audioFile)
-          .outputOptions([
-            '-c:v copy',
-            '-c:a aac',
-            '-map 0:v:0',
-            '-map 1:a:0',
-            '-shortest'
-          ])
+          .outputOptions(['-c:v copy', '-c:a aac', '-map 0:v:0', '-map 1:a:0', '-shortest'])
           .output(outputFile)
           .on('end', resolve)
           .on('error', reject)
           .run();
       });
 
-      res.download(outputFile, 'video.mp4', (err) => {
-        cleanupFiles(videoFile, audioFile, outputFile);
-        if (err) console.error('发送文件失败:', err);
-      });
-      return;
+      // 清理中间文件
+      cleanupFiles(videoFile, audioFile);
+      task.outputFile = outputFile;
+      task.filename = 'video.mp4';
     }
 
-    // 剪辑操作
-    if (action === 'trim' && trim) {
+    // ---- action: trim ----
+    else if (action === 'trim' && trim) {
       const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
       const outputFile = path.join(TEMP_DIR, `${taskId}_output.mp4`);
 
@@ -850,55 +803,108 @@ app.post('/download', async (req, res) => {
           .run();
       });
 
-      res.download(outputFile, 'video.mp4', (err) => {
-        cleanupFiles(inputFile, outputFile);
-        if (err) console.error('发送文件失败:', err);
-      });
-      return;
+      cleanupFiles(inputFile);
+      task.outputFile = outputFile;
+      task.filename = 'video.mp4';
     }
 
-    // 提取音频
-    if (action === 'extract-audio') {
+    // ---- action: extract-audio ----
+    else if (action === 'extract-audio') {
+      const fmt = audioFormat || 'mp3';
       const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
-      const outputFile = path.join(TEMP_DIR, `${taskId}_output.${audioFormat}`);
+      const outputFile = path.join(TEMP_DIR, `${taskId}_output.${fmt}`);
 
       await downloadFile(videoUrl, `${taskId}_input`, dlHeaders);
 
       let command = ffmpeg(inputFile).noVideo();
-
-      if (audioFormat === 'mp3') {
-        command = command.outputOptions([
-          '-c:a libmp3lame',
-          `-b:a ${audioBitrate}k`
-        ]);
-      } else if (audioFormat === 'm4a' || audioFormat === 'aac') {
-        command = command.outputOptions([
-          '-c:a aac',
-          `-b:a ${audioBitrate}k`
-        ]);
+      if (fmt === 'mp3') {
+        command = command.outputOptions(['-c:a libmp3lame', `-b:a ${audioBitrate || 320}k`]);
+      } else if (fmt === 'm4a' || fmt === 'aac') {
+        command = command.outputOptions(['-c:a aac', `-b:a ${audioBitrate || 320}k`]);
+      } else if (fmt === 'wav') {
+        command = command.outputOptions(['-c:a pcm_s16le']);
       }
 
       await new Promise((resolve, reject) => {
-        command
-          .output(outputFile)
-          .on('end', resolve)
-          .on('error', reject)
-          .run();
+        command.output(outputFile).on('end', resolve).on('error', reject).run();
       });
 
-      res.download(outputFile, `audio.${audioFormat}`, (err) => {
-        cleanupFiles(inputFile, outputFile);
-        if (err) console.error('发送文件失败:', err);
-      });
-      return;
+      cleanupFiles(inputFile);
+      task.outputFile = outputFile;
+      task.filename = `audio.${fmt}`;
     }
 
-    return res.status(400).json({ error: '不支持的操作' });
+    else {
+      throw new Error('不支持的操作');
+    }
+
+    task.status = 'done';
+    console.log(`[Task:${taskId}] 完成: ${task.outputFile}`);
 
   } catch (error) {
-    console.error('[Download] 错误:', error);
-    res.status(500).json({ error: error.message });
+    console.error(`[Task:${taskId}] 失败:`, error.message);
+    task.status = 'error';
+    task.error = error.message;
   }
+}
+
+/**
+ * 下载视频（异步任务模式）
+ * POST /download
+ * Body: { videoUrl, formatId, audioUrl, action, trim, audioFormat, audioBitrate, referer }
+ * 立即返回 taskId，客户端轮询 GET /task/:taskId
+ */
+app.post('/download', (req, res) => {
+  const { videoUrl, action = 'download', audioUrl } = req.body;
+
+  if (!videoUrl) {
+    return res.status(400).json({ error: '缺少 videoUrl' });
+  }
+
+  // 提前校验 merge 必须有 audioUrl
+  if (action === 'merge' && !audioUrl) {
+    return res.status(400).json({ error: '不支持的操作' });
+  }
+
+  const taskId = uuidv4();
+  tasks.set(taskId, { status: 'pending', outputFile: null, filename: null, error: null, createdAt: Date.now() });
+
+  // 异步执行，不等待
+  runDownloadTask(taskId, req.body).catch(err => console.error(`[Task:${taskId}] 未捕获错误:`, err));
+
+  res.json({ taskId });
+});
+
+/**
+ * 查询任务状态
+ * GET /task/:taskId
+ */
+app.get('/task/:taskId', (req, res) => {
+  const task = tasks.get(req.params.taskId);
+  if (!task) return res.status(404).json({ error: '任务不存在' });
+
+  res.json({
+    taskId: req.params.taskId,
+    status: task.status,   // pending | processing | done | error
+    error: task.error || undefined,
+  });
+});
+
+/**
+ * 下载任务结果文件
+ * GET /task/:taskId/file
+ */
+app.get('/task/:taskId/file', (req, res) => {
+  const task = tasks.get(req.params.taskId);
+  if (!task) return res.status(404).json({ error: '任务不存在' });
+  if (task.status !== 'done') return res.status(400).json({ error: `任务状态: ${task.status}` });
+  if (!task.outputFile || !fs.existsSync(task.outputFile)) return res.status(404).json({ error: '文件不存在' });
+
+  res.download(task.outputFile, task.filename, (err) => {
+    cleanupFiles(task.outputFile);
+    tasks.delete(req.params.taskId);
+    if (err) console.error('发送文件失败:', err);
+  });
 });
 
 // 定时清理过期临时文件（每小时）
