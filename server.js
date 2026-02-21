@@ -708,7 +708,7 @@ const tasks = new Map();
 /**
  * 后台执行下载任务
  */
-async function runDownloadTask(taskId, { videoUrl, formatId, audioUrl, action, trim, audioFormat, audioBitrate, referer }) {
+async function runDownloadTask(taskId, { videoUrl, formatId, audioUrl, action, trim, audioFormat, audioBitrate, referer, videoOnly }) {
   const task = tasks.get(taskId);
   if (!task) return;
 
@@ -723,8 +723,13 @@ async function runDownloadTask(taskId, { videoUrl, formatId, audioUrl, action, t
 
         let formatArg;
         if (formatId) {
-          const hasAudioFormats = ['18', '22', '36', '17', '5', '6'];
-          formatArg = hasAudioFormats.includes(formatId) ? formatId : `${formatId}+bestaudio/best`;
+          if (videoOnly) {
+            // 仅视频：只下载指定格式，不合并音频
+            formatArg = formatId;
+          } else {
+            const hasAudioFormats = ['18', '22', '36', '17', '5', '6'];
+            formatArg = hasAudioFormats.includes(formatId) ? formatId : `${formatId}+bestaudio/best`;
+          }
         } else {
           formatArg = 'bestvideo+bestaudio/best';
         }
@@ -813,7 +818,27 @@ async function runDownloadTask(taskId, { videoUrl, formatId, audioUrl, action, t
       const inputFile = path.join(TEMP_DIR, `${taskId}_input`);
       const outputFile = path.join(TEMP_DIR, `${taskId}_output.${fmt}`);
 
-      await downloadFile(videoUrl, `${taskId}_input`, dlHeaders);
+      // YouTube URL 用 yt-dlp 下载最佳音频
+      if (needsYtdlp(videoUrl)) {
+        const ytdlpFormat = formatId || 'bestaudio';
+        console.log(`[Task:${taskId}] extract-audio via yt-dlp, format: ${ytdlpFormat}`);
+        await new Promise((resolve, reject) => {
+          const ytdlp = spawn('yt-dlp', [
+            '-f', ytdlpFormat,
+            '--no-warnings',
+            '--no-playlist',
+            '-o', inputFile,
+            videoUrl
+          ]);
+          let stderr = '';
+          ytdlp.stdout.on('data', d => { if (d.toString().includes('[download]')) console.log(`[Task:${taskId}] ${d.toString().trim()}`); });
+          ytdlp.stderr.on('data', d => { stderr += d.toString(); });
+          ytdlp.on('error', err => reject(new Error(`yt-dlp 启动失败: ${err.message}`)));
+          ytdlp.on('close', code => code === 0 ? resolve() : reject(new Error(`yt-dlp 失败 (code ${code}): ${stderr}`)));
+        });
+      } else {
+        await downloadFile(videoUrl, `${taskId}_input`, dlHeaders);
+      }
 
       let command = ffmpeg(inputFile).noVideo();
       if (fmt === 'mp3') {
