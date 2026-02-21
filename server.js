@@ -31,13 +31,12 @@ app.use((req, res, next) => {
 });
 
 /**
- * 检测是否需要使用 yt-dlp 下载
+ * 检测是否需要使用 yt-dlp 下载（仅限 YouTube 页面 URL，不包括直链）
  */
 function needsYtdlp(url) {
-  return url.includes('youtube.com') ||
-    url.includes('youtu.be') ||
-    url.includes('googlevideo.com') ||
-    url.includes('.m3u8');
+  return (url.includes('youtube.com/watch') ||
+    url.includes('youtu.be/')) &&
+    !url.includes('googlevideo.com');
 }
 
 /**
